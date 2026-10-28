@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 command -v typst >/dev/null 2>&1 || {
-  echo "typst not found; install with: brew install typst" >&2
+  echo "typst not found; install with brew or another package manager (cargo install typst-cli, scoop install typst, distro package)" >&2
   exit 2
 }
 

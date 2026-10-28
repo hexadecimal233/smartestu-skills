@@ -2,7 +2,8 @@
 // smartestu.cn API client.
 // Credentials come from the environment or a credentials file; writes require --allow-write.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -15,6 +16,7 @@ function usage() {
   process.stderr.write(`usage: smartestu-api.mjs <command> [options]
 
 commands
+  doctor                               check node, credentials, session, courses, typst
   session                              GET  /api/auth/session, refresh tokens
   courses                              POST /api/homework/student/course/query
   homeworks                            POST /api/homework/student/mark/queryHomeworks
@@ -133,7 +135,7 @@ async function call(method, path, body, { raw } = {}) {
   let { status, text, parsed } = await request(method, path, body)
   // Access cookie lives 15 minutes. A 401 rejects before execution, so one re-mint is safe.
   if ((status === 401 || status === 403) && api.creds.refreshCookie && !path.startsWith('/api/auth/')) {
-    await mintAccess()
+    try { await mintAccess() } catch { /* fall through to the 401 report below */ }
     ;({ status, text, parsed } = await request(method, path, body))
   }
   if (status === 401 || status === 403) {
@@ -212,10 +214,7 @@ const ACCESS_COOKIE = "__Host-auth_access_v1"
 
 // The refresh cookie buys a 15 minute access cookie; the server returns it in set-cookie.
 async function mintAccess() {
-  if (!api.creds.refreshCookie) {
-    process.stderr.write("no refresh cookie: set SMARTESTU_REFRESH_COOKIE or write refreshCookie into the credentials file\n")
-    process.exit(2)
-  }
+  if (!api.creds.refreshCookie) throw new Error("no refresh cookie: set SMARTESTU_REFRESH_COOKIE or write refreshCookie into the credentials file")
   const res = await fetch(`${api.base}/api/auth/session`, {
     headers: {
       accept: "application/json, text/plain, */*",
@@ -230,10 +229,7 @@ async function mintAccess() {
   try { parsed = text ? JSON.parse(text) : null } catch { parsed = undefined }
   const jar = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : []
   const access = jar.map((c) => c.split(";")[0]).find((c) => c.startsWith(`${ACCESS_COOKIE}=`))
-  if (res.status !== 200 || !access) {
-    process.stderr.write(`cannot mint access cookie: HTTP ${res.status} ${text.slice(0, 160)}\n`)
-    process.exit(3)
-  }
+  if (res.status !== 200 || !access) throw new Error(`cannot mint access cookie: HTTP ${res.status} ${text.slice(0, 160)}`)
   api.creds.accessCookie = access
   if (parsed?.csrfToken) api.creds.csrfToken = parsed.csrfToken
   if (parsed?.sessionContext) api.creds.sessionContext = parsed.sessionContext
@@ -247,7 +243,7 @@ async function ensureSession() {
     process.exit(2)
   }
   if (api.creds.refreshCookie) {
-    await mintAccess()
+    try { await mintAccess() } catch (e) { process.stderr.write(`${e.message}\n`); process.exit(3) }
     return
   }
   if (api.creds.csrfToken && api.creds.sessionContext) return
@@ -259,6 +255,76 @@ async function ensureSession() {
   api.creds.csrfToken = parsed.csrfToken
   api.creds.sessionContext = parsed.sessionContext
   saveCreds(api.credsPath, api.creds)
+}
+
+function maskId(value) {
+  const s = String(value ?? '')
+  return s.replace(/\d/g, (d, offset) => (offset >= s.length - 2 ? d : '*'))
+}
+
+// Startup check: dependencies, credentials, a live session, and whether the account can see any course.
+async function doctor() {
+  const rows = []
+  const add = (state, name, detail) => rows.push({ state, name, detail })
+
+  const major = Number(String(process.versions.node).split('.')[0])
+  add(major >= 18 ? 'ok' : 'fail', 'node', `v${process.versions.node}${major >= 18 ? '' : ', needs 18 or newer'}`)
+
+  if (existsSync(api.credsPath)) {
+    const mode = (statSync(api.credsPath).mode & 0o777).toString(8)
+    add(mode === '600' ? 'ok' : 'warn', 'creds file', `${api.credsPath} mode ${mode}`)
+  } else {
+    const hasEnvCookie = Boolean(api.creds.refreshCookie || api.creds.accessCookie)
+    add(hasEnvCookie ? 'warn' : 'fail', 'creds file', `${api.credsPath} not written yet`)
+  }
+
+  add(
+    api.creds.refreshCookie ? 'ok' : api.creds.accessCookie ? 'warn' : 'fail',
+    'cookie',
+    api.creds.refreshCookie
+      ? 'refresh cookie present'
+      : api.creds.accessCookie
+        ? 'access cookie only, expires 15 minutes after mint'
+        : 'none, export SMARTESTU_REFRESH_COOKIE',
+  )
+
+  let live = false
+  if (api.creds.refreshCookie || api.creds.accessCookie) {
+    try {
+      const session = await mintAccess()
+      add('ok', 'account', `${session?.user?.role ?? 'unknown role'} ${maskId(session?.user?.schoolUserId)}`)
+      const tokens = Boolean(session?.csrfToken && session?.sessionContext)
+      add(tokens ? 'ok' : 'fail', 'tokens', tokens ? 'csrfToken and sessionContext present' : 'one of csrfToken, sessionContext missing')
+      live = tokens
+    } catch (e) {
+      const network = /fetch failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|network/i.test(e.message)
+      add(network ? 'warn' : 'fail', 'account', network ? `network unreachable: ${e.message}` : e.message)
+    }
+  } else {
+    add('skip', 'account', 'no cookie to test')
+  }
+
+  if (live) {
+    const courses = await request('POST', '/api/homework/student/course/query', {})
+    const list = Array.isArray(courses.parsed?.data) ? courses.parsed.data : []
+    add(list.length > 0 ? 'ok' : 'warn', 'courses', list.length > 0 ? `${list.length}: ${list.map((c) => c.name).join(', ')}` : 'none returned, so 作业 queries stay empty')
+
+    const portal = await request('POST', '/api/homework/student/portal-summary', {})
+    const pending = portal.parsed?.data?.pendingHomeworkCount
+    add(Number.isFinite(pending) ? 'ok' : 'warn', 'portal', Number.isFinite(pending) ? `${pending} pending` : `no count, HTTP ${portal.status}`)
+  } else {
+    add('skip', 'courses', 'needs a working session')
+    add('skip', 'portal', 'needs a working session')
+  }
+
+  const typst = spawnSync('typst', ['--version'], { encoding: 'utf8' })
+  add(typst.status === 0 ? 'ok' : 'warn', 'typst', typst.status === 0 ? typst.stdout.trim() : 'not found, only render-math.sh needs it; install with brew or another package manager')
+
+  const width = Math.max(...rows.map((r) => r.name.length))
+  for (const r of rows) process.stdout.write(`${r.state.padEnd(4)} ${r.name.padEnd(width)}  ${r.detail}\n`)
+  const failed = rows.filter((r) => r.state === 'fail').length
+  process.stdout.write(`\n${failed === 0 ? 'ready' : `${failed} check(s) failed`}\n`)
+  return failed === 0
 }
 
 async function main() {
@@ -273,9 +339,15 @@ async function main() {
 
   const opts = { raw: Boolean(args.raw) }
 
+  if (command === 'doctor') {
+    const ok = await doctor()
+    process.exit(ok ? 0 : 1)
+  }
+
   if (command === 'session') {
     if (api.creds.refreshCookie) {
-      const parsed = await mintAccess()
+      let parsed
+      try { parsed = await mintAccess() } catch (e) { process.stderr.write(`${e.message}\n`); process.exit(3) }
       output(parsed, JSON.stringify(parsed), opts.raw)
       return
     }

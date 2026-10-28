@@ -28,10 +28,12 @@ npx skills add hexadecimal233/smartestu-skills -g
 
 ```bash
 export SMARTESTU_REFRESH_COOKIE='__Host-auth_refresh_v1=...'
-node scripts/smartestu-api.mjs session
+node scripts/smartestu-api.mjs doctor
 ```
 
-这一条命令会换出 access cookie，连同 `csrfToken`、`sessionContext` 一起写进 `~/.config/smartestu/creds.json`，权限 600，位于仓库之外。之后不必再传参数。access cookie 只有 15 分钟有效，脚本每次运行自动换取，遇到 401 再换一次。
+`doctor` 逐项报告 node、凭据文件与权限、cookie、账号角色（学号打码）、令牌、课程列表、待交数量、typst 版本。`fail` 表示这项挡住后续操作，`warn` 只提示（没装 typst、课程为空、网络不通）。全部通过时退出码 0。
+
+换到的 access cookie 会连同 `csrfToken`、`sessionContext` 一起写进 `~/.config/smartestu/creds.json`，权限 600，位于仓库之外。之后不必再传参数。access cookie 只有 15 分钟有效，脚本每次运行自动换取，遇到 401 再换一次。
 
 提交答案、交卷、订正、申诉、签到都会改动学生记录。每次写入前 agent 会先列出要发的内容与代价，等明确确认再发；交卷单独问一次，不会跟着做题一起提交。`write` 子命令要求显式加 `--allow-write`，agent 不会自己加。
 
@@ -40,6 +42,7 @@ node scripts/smartestu-api.mjs session
 想自己看数据时：
 
 ```bash
+node scripts/smartestu-api.mjs doctor           # 自检：依赖、凭据、会话、课程
 node scripts/smartestu-api.mjs session          # 账号、csrf、sessionContext
 node scripts/smartestu-api.mjs courses          # 课程列表
 node scripts/smartestu-api.mjs pending          # 未交作业，按截止时间排序
@@ -63,4 +66,4 @@ node scripts/smartestu-api.mjs get /api/config  # 任意 GET
 ## 依赖
 
 - Node 18 以上，脚本用到 `fetch` 与 `--import`
-- typst 0.15 以上，只有渲染图片时需要：`brew install typst`
+- typst 0.15 以上，只有渲染图片时需要：用 `brew install typst` 或其他包管理器安装（`cargo install typst-cli`、`scoop install typst`、各发行版自带的包等）

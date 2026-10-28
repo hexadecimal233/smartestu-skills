@@ -21,6 +21,18 @@ Reconstructed from two browser HAR captures of `https://smartestu.cn/assignment`
 | `scripts/smartestu-api.mjs` | Credential-aware HTTP client, read-only by default |
 | `scripts/render-math.sh` | Render one Chinese-plus-math line to PNG or SVG with typst |
 
+## Start here
+
+One check per session, before touching the API:
+
+```bash
+node scripts/smartestu-api.mjs doctor
+```
+
+It reports node, credentials file and its permissions, cookie presence, a live access-cookie mint with role and masked school id, whether `csrfToken` and `sessionContext` arrived, the course list, the portal pending count, and typst availability. `fail` lines block the work; `warn` lines (no typst, empty course list, unreachable network) get reported while the read flows still run. Exit 0 means ready.
+
+A `fail` on `account` means the refresh cookie is dead, so ask for a fresh copy. A `fail` on `creds file` with `cookie` set means the inline cookie works but nothing is stored yet; run `session` once to persist it.
+
 ## Credentials
 
 Two HttpOnly cookies, issued by `https://smartestu.cn`:
@@ -80,6 +92,7 @@ curl -s -X POST https://smartestu.cn/api/homework/student/mark/queryExercisesByH
 Helper that carries the headers and the write guard:
 
 ```bash
+node scripts/smartestu-api.mjs doctor
 node scripts/smartestu-api.mjs session
 node scripts/smartestu-api.mjs courses
 node scripts/smartestu-api.mjs pending
